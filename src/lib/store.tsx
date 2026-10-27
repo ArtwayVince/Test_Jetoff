@@ -1,0 +1,240 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import type { GoalJourney } from "@/lib/journeys";
+
+export type Role = "explorer" | "provider" | "admin";
+export type Attr = "Mindset" | "Presence" | "Discipline" | "Network";
+export type Goal = {
+  id: string;
+  title: string;
+  target: number;
+  saved: number;
+  log: { amt: number; at: string }[];
+};
+export type JourneyProgress = {
+  stage: number;
+  notes: { stage: number; note: string; at: string }[];
+};
+export type GoalActivityRecord = {
+  result: string;
+  completedAt: string;
+  reusedFromHistoryId?: string;
+};
+export type GoalNextAction = {
+  id: string;
+  sourceActivityId: string;
+  sourceActionId?: string;
+  sourceActivityTitle: string;
+  sourceResult: string;
+  category: "progress" | "clarify" | "revise" | "help";
+  title: string;
+  recommendation: string;
+  rationale: string;
+  followUpQuestion?: string;
+  status: "proposed" | "accepted" | "completed";
+  createdAt: string;
+  acceptedAt?: string;
+  completedAt?: string;
+  result?: string;
+  archivedAt?: string;
+};
+export type GoalActivityHistoryRecord = {
+  id: string;
+  planTitle: string;
+  activityTitle: string;
+  result: string;
+  completedAt: string;
+  archivedAt: string;
+  reusedInActivityId?: string;
+};
+export type Request = {
+  id: string;
+  expId: string;
+  title: string;
+  date: string;
+  note: string;
+  at: string;
+};
+export type ProviderApp = {
+  id: string;
+  business: string;
+  category: string;
+  contact: string;
+  description: string;
+  status: "pending" | "approved" | "rejected";
+  at: string;
+};
+
+export type State = {
+  user: { name: string; email: string } | null;
+  role: Role;
+  xp: number;
+  attrs: Record<Attr, number>;
+  wallet: number;
+  budgetCompleted: number[];
+  goals: Goal[];
+  /** Legacy starter-step indexes retained so older saved progress is never silently discarded. */
+  goalSteps: Record<string, number[]>;
+  /** Stable activity IDs map to a self-reported result and completion timestamp. */
+  goalActivityRecords: Record<string, Record<string, GoalActivityRecord>>;
+  /** Completed results from earlier plans, retained for review and explicit reuse. */
+  goalActivityHistory: Record<string, GoalActivityHistoryRecord[]>;
+  /** AI next-action proposals and player decisions, stored locally per ambition. */
+  goalNextActions: Record<string, GoalNextAction[]>;
+  schemaVersion: number;
+  requests: Request[];
+  apps: ProviderApp[];
+  missions: {
+    m1: boolean;
+    m2: boolean;
+    m3: boolean;
+    m3Option?: "A" | "B";
+    aspiration?: string;
+    reflection?: string;
+    photo?: string;
+  };
+  /** Journey stages and reflections tracked independently for each ambition. */
+  journeyProgressByGoal: Record<string, JourneyProgress>;
+  /** Legacy global journey fields retained for migration compatibility. */
+  stage: number;
+  stageNotes: { stage: number; note: string; at: string }[];
+  streak: number;
+  lastDay?: string;
+  dailyDone: string[];
+  toured: string[];
+  readiness: number;
+  /** Best practice score recorded separately for each ambition. */
+  readinessByGoal: Record<string, number>;
+  /** Prevent repeat XP for a completed readiness quiz, tracked per ambition. */
+  readinessRewardedByGoal: Record<string, boolean>;
+  /** AI-generated activity plans, stored locally per ambition. */
+  aiJourneys: Record<string, GoalJourney>;
+  badges: string[];
+};
+
+const initial: State = {
+  user: null,
+  role: "explorer",
+  xp: 0,
+  attrs: { Mindset: 0, Presence: 0, Discipline: 0, Network: 0 },
+  wallet: 100000,
+  budgetCompleted: [],
+  goals: [],
+  goalSteps: {},
+  goalActivityRecords: {},
+  goalActivityHistory: {},
+  goalNextActions: {},
+  schemaVersion: 4,
+  requests: [],
+  apps: [],
+  missions: { m1: false, m2: false, m3: false },
+  stage: 0,
+  stageNotes: [],
+  journeyProgressByGoal: {},
+  streak: 0,
+  dailyDone: [],
+  toured: [],
+  readiness: 0,
+  readinessByGoal: {},
+  readinessRewardedByGoal: {},
+  aiJourneys: {},
+  badges: [],
+};
+
+export const XP_PER_LEVEL = 100;
+export const STAGE_NOTE_MIN_LENGTH = 20;
+export const shouldAwardScenarioXp = (completed: number[], scenarioIndex: number) =>
+  !completed.includes(scenarioIndex);
+export const shouldAwardReadinessXp = (rewardedByGoal: Record<string, boolean>, goalId: string) =>
+  !rewardedByGoal[goalId];
+export const hasCompletedDailyChallenge = (dailyDone: string[], date: string) =>
+  dailyDone.some((entry) => entry.startsWith(`${date}|`));
+export const isMeaningfulReflection = (note: string) => note.trim().length >= STAGE_NOTE_MIN_LENGTH;
+export const levelOf = (xp: number) => Math.floor(xp / XP_PER_LEVEL) + 1;
+
+type Ctx = {
+  s: State;
+  set: (fn: (s: State) => State) => void;
+  gain: (xp: number, attrs?: Partial<Record<Attr, number>>) => void;
+  badge: (b: string) => void;
+  reset: () => void;
+};
+const C = createContext<Ctx | null>(null);
+const KEY = "jetoff-v1";
+
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [s, setS] = useState<State>(initial);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<State>;
+        const priorReadiness = parsed.readinessByGoal ?? {};
+        const legacyJourney = { stage: parsed.stage ?? 0, notes: parsed.stageNotes ?? [] };
+        const journeyProgressByGoal =
+          parsed.journeyProgressByGoal ??
+          (parsed.goals?.length && (legacyJourney.stage > 0 || legacyJourney.notes.length > 0)
+            ? { [parsed.goals[0].id]: legacyJourney }
+            : {});
+        setS({
+          ...initial,
+          ...parsed,
+          schemaVersion: 4,
+          journeyProgressByGoal,
+          goalActivityRecords: parsed.goalActivityRecords ?? {},
+          goalActivityHistory: parsed.goalActivityHistory ?? {},
+          goalNextActions: parsed.goalNextActions ?? {},
+          aiJourneys: parsed.aiJourneys ?? {},
+          readinessRewardedByGoal:
+            parsed.readinessRewardedByGoal ??
+            Object.fromEntries(Object.keys(priorReadiness).map((goalId) => [goalId, true])),
+        });
+      }
+    } catch {
+      // Fallback to initial state if localStorage is invalid or unreadable
+    }
+    setReady(true);
+  }, []);
+  useEffect(() => {
+    if (ready) localStorage.setItem(KEY, JSON.stringify(s));
+  }, [s, ready]);
+
+  const set = (fn: (s: State) => State) => setS(fn);
+  const badge = (b: string) =>
+    setS((p) => (p.badges.includes(b) ? p : { ...p, badges: [...p.badges, b] }));
+  const gain = (xp: number, attrs: Partial<Record<Attr, number>> = {}) =>
+    setS((p) => {
+      const a = { ...p.attrs };
+      (Object.keys(attrs) as Attr[]).forEach((k) => (a[k] += attrs[k] ?? 0));
+      const nx = p.xp + xp;
+      const leveled = levelOf(nx) > levelOf(p.xp);
+      const badges =
+        leveled && !p.badges.includes(`Level ${levelOf(nx)}`)
+          ? [...p.badges, `Level ${levelOf(nx)}`]
+          : p.badges;
+      return { ...p, xp: nx, attrs: a, badges };
+    });
+  const reset = () => setS(initial);
+  return <C.Provider value={{ s, set, gain, badge, reset }}>{children}</C.Provider>;
+}
+
+export function useStore() {
+  const c = useContext(C);
+  if (!c) throw new Error("StoreProvider missing");
+  return c;
+}
+
+export const today = () => new Date().toISOString().slice(0, 10);
+
+/** Encouraging, non-punitive coaching for a saving entry. */
+export function coach(saved: number, target: number, amt: number) {
+  const pct = target ? (saved / target) * 100 : 0;
+  if (amt <= 0) return "Every journey has pauses. Come back whenever you're ready.";
+  if (saved <= 1000) {
+    const formatted = Math.round(amt).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return `₦${formatted} is a genuine first step. Starting is the hardest part — you did it.`;
+  }
+  if (pct < 10) return "Small, steady steps build the habit. Keep showing up.";
+  if (pct < 50) return "Real progress. You're building discipline that lasts.";
+  return "You're more than halfway on your record. Stay steady — and keep it realistic.";
+}

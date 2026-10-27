@@ -1,0 +1,6 @@
+{
+  "name": "JET OFF - Ambition Quest Go",
+  "description": "Mobile-first platform combining real-world goals, experiences, bookings, and personal development gamified with XP, levels, and challenges.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
